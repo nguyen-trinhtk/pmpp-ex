@@ -1,7 +1,9 @@
 /* matrix-add.cu
 PMPP Exercise 3.9.1 (pg 67)
 a. Write host stub function
-b. 
+b. Kernel 1: each thread compute one output entry
+c. Kernel 2: each thread compute one output row
+d. Kernel 3: each thread compute one output column
 */ 
 
 #include <random>
@@ -16,7 +18,6 @@ b.
 
 // ===================== Constants ===================== 
 constexpr double SINGLE_EPS = 1e-6; // Single precision tolerance?
-constexpr size_t BLOCK_SIZE = 32;
 
 // ===================== Host helper functions ===================== 
 // float random_finite_float(std::mt19937& gen) {
@@ -75,7 +76,29 @@ void naiveMatAddKernel(float* dC, float* dA, float* dB, size_t N) {
 
     if (x < N && y < N) {
         int i = y * N + x;
-        dC[i] = dA[i] + dB[i]; // each thread compute one on output
+        dC[i] = dA[i] + dB[i]; // each thread compute one output
+    }
+}
+
+// Slow (nearby thread access strided memory locs)
+__global__
+void rowMatAddKernel(float* dC, float* dA, float* dB, size_t N) {
+    int r = blockIdx.x * blockDim.x + threadIdx.x; 
+    if (r < N) {
+        for (int i = r * N; i < r * N + N; i++) {
+            dC[i] = dA[i] + dB[i];
+        }
+    }
+}
+
+// Col kernel is faster than row kernel because its coalesced
+__global__
+void colMatAddKernel(float* dC, float* dA, float* dB, size_t N) {
+    int c = blockIdx.x * blockDim.x + threadIdx.x; 
+    if (c < N) {
+        for (int i = c; i < N * N; i+=N) {
+            dC[i] = dA[i] + dB[i];
+        }
     }
 }
 
@@ -93,12 +116,45 @@ void ker_add_matrix(float* C, float* A, float* B, size_t N) {
     cudaMemcpy(d_A, A, size * sizeof(float), cudaMemcpyHostToDevice);
     cudaMemcpy(d_B, B, size * sizeof(float), cudaMemcpyHostToDevice);
 
-    size_t grid_size = CEIL_DIV(N, BLOCK_SIZE);
-    dim3 grid(grid_size, grid_size, 1);
-    dim3 block(BLOCK_SIZE, BLOCK_SIZE, 1);
+    // CUDA Event
+    cudaEvent_t start, stop; 
+    cudaEventCreate(&start); 
+    cudaEventCreate(&stop);
 
-    naiveMatAddKernel<<<grid, block>>>(d_C, d_A, d_B, N);
+    cudaEventRecord(start);
 
+    // // b. Each thread compute one output
+    // size_t block_size = 32;
+    // size_t grid_size = CEIL_DIV(N, block_size);
+    // dim3 grid(grid_size, grid_size, 1);
+    // dim3 block(block_size, block_size, 1);
+    // naiveMatAddKernel<<<grid, block>>>(d_C, d_A, d_B, N);
+
+    // c. Each thread compute one row
+    // size_t block_size = 256;
+    // size_t grid_size = CEIL_DIV(N * N, block_size);
+    // dim3 grid(grid_size, 1, 1);
+    // dim3 block(block_size, 1, 1);
+    // rowMatAddKernel<<<grid, block>>>(d_C, d_A, d_B, N);
+
+    // // d. Each thread compute one column
+    size_t block_size = 256;
+    size_t grid_size = CEIL_DIV(N * N, block_size);
+    dim3 grid(grid_size, 1, 1);
+    dim3 block(block_size, 1, 1);
+    colMatAddKernel<<<grid, block>>>(d_C, d_A, d_B, N);
+
+    cudaEventRecord(stop);
+    cudaDeviceSynchronize(); // wait event stop fully
+
+    // Time elapsed
+    float ms = 0.0f; 
+    cudaEventElapsedTime(&ms, start, stop);
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
+    std::cout << "Kernel time elapsed: " << ms << " ms" << std::endl;
+
+    // Copy back to host and free device buffers
     cudaMemcpy(C, d_C, size * sizeof(float), cudaMemcpyDeviceToHost);
     cudaFree(d_A); 
     cudaFree(d_B);
